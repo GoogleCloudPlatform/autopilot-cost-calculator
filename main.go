@@ -78,7 +78,7 @@ func main() {
 		log.Fatalf("Error getting GKE cluster information: %s, %v", clusterName, err)
 	}
 
-	if clusterObject.Autopilot.Enabled {
+	if clusterObject.Autopilot != nil && clusterObject.Autopilot.Enabled {
 		log.Fatalf("This is already an Autopilot cluster, `aborting`")
 	}
 
