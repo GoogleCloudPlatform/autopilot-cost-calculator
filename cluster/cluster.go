@@ -17,6 +17,7 @@ package cluster
 import (
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -119,8 +120,8 @@ func ListPods(client kubernetes.Interface) (*v1.PodList, error) {
 		metav1.ListOptions{FieldSelector: "status.phase=Running,metadata.namespace!=kube-system,metadata.namespace!=gke-gmp-system"},
 	)
 	if err != nil {
-		err = fmt.Errorf("error getting pods: %v", err)
-		return nil, err
+		// Log the error, but continue execution
+		log.Printf("Error listing pods: %v", err)
 	}
 	return pods, nil
 }
@@ -146,8 +147,8 @@ func ListNodes(client kubernetes.Interface) (*v1.NodeList, error) {
 func DescribePod(client kubernetes.Interface, podName string, namespace string) (*v1.Pod, error) {
 	pod, err := client.CoreV1().Pods(namespace).Get(context.Background(), podName, metav1.GetOptions{})
 	if err != nil {
-		err = fmt.Errorf("error getting pods: %v", err)
-		return nil, err
+		// Log the error, but continue execution
+		log.Printf("Error getting pod %s in namespace %s: %v", podName, namespace, err)
 	}
 	return pod, nil
 }
