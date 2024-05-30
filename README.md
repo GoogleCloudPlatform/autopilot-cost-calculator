@@ -8,7 +8,7 @@ To obtain an estimate, you need to be have your workloads already running on a G
 
 This gives an output table and can also export the results into a JSON file. JSON file can later be imported into any analytical tool (eg. BigQuery) to better understand cost variations based on workload utilization.
 
-**Accuracy**: Shown prices are an estimation! Since GKE Autopilot has 3 compute classes (regular, balanced, scale-out) with multiple vendors types (AMD, Intel) and different architectures (amd64 and arm64), some assumptions had to be made in the calculation logic. Having that in mind, the estimation should be relatively close to reality. This tool doesn't yet support workloads with GPUs, so if you have any, it will not be reflected in the price.
+**Accuracy**: Shown prices are an estimation! Since GKE Autopilot has multiple compute classes (general-purpose, balanced, scale-out, performance and accelerator backed) with multiple vendors types (AMD, Intel) and different architectures (amd64 and arm64), some assumptions had to be made in the calculation logic. Having that in mind, the estimation should be relatively close to reality. This tool doesn't yet support workloads with TPUs, so if you have any, it will not be reflected in the price.
 
 ### Sample output looks like the following:
 
