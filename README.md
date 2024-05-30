@@ -26,6 +26,8 @@ To execute the tests, just run `go test` command.
 
 Before you start, make sure you have [gcloud CLI](https://cloud.google.com/sdk/docs/install) installed on the machine where you are planning to execute APCostCalculator.
 
+Enable Cloud Billing API on your project: https://console.cloud.google.com/apis/api/cloudbilling.googleapis.com/metrics?project=PROJECT_NAME
+
 The easiest way to use the tool is to authenticate via ` gcloud auth application-default login` with the account containing the right permissions. Then get the credentials for the GKE cluster by running the following command: `gcloud container clusters get-credentials CLUSTER_NAME --zone ZONE --project PROJECT_NAME`.
 
 Now the application should be able connect to your GKE cluster and provide a price estimate.

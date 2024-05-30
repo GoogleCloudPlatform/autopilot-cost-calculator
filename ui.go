@@ -19,7 +19,6 @@ import (
 	"os"
 	"strconv"
 
-	"github.com/GoogleCloudPlatform/autopilot-cost-calculator/calculator"
 	"github.com/GoogleCloudPlatform/autopilot-cost-calculator/cluster"
 	"github.com/charmbracelet/bubbles/table"
 	tea "github.com/charmbracelet/bubbletea"
@@ -54,12 +53,13 @@ func DisplayNodeTable(nodes map[string]cluster.Node) {
 		{Title: "Name", Width: 55},
 		{Title: "Type", Width: 15},
 		{Title: "Region", Width: 20},
+		{Title: "Accelerator", Width: 25},
 		{Title: "Spot?", Width: 10},
 	}
 
 	var rows []table.Row
 	for _, node := range nodes {
-		rows = append(rows, table.Row{node.Name, node.InstanceType, node.Region, strconv.FormatBool(node.Spot)})
+		rows = append(rows, table.Row{node.Name, node.InstanceType, node.Region, node.Accelerator, strconv.FormatBool(node.Spot)})
 	}
 
 	tbl := table.New(
@@ -89,7 +89,7 @@ func DisplayNodeTable(nodes map[string]cluster.Node) {
 	}
 }
 
-func DisplayWorkloadTable(nodes map[string]cluster.Node, oneYearDiscount float64, threeYearDiscount float64) {
+func DisplayWorkloadTable(nodes map[string]cluster.Node, oneYearDiscount float64, threeYearDiscount float64, clusterFee float64) {
 	columns := []table.Column{
 		{Title: "Node", Width: 55},
 		{Title: "Workload", Width: 40},
@@ -103,7 +103,7 @@ func DisplayWorkloadTable(nodes map[string]cluster.Node, oneYearDiscount float64
 	}
 
 	var rows []table.Row
-	totalCost := calculator.CLUSTER_FEE // Cluster fee is fixed amount
+	totalCost := 0.0 // Cluster fee is fixed amount
 	totalCostSpot := 0.0
 
 	for _, node := range nodes {
@@ -130,9 +130,9 @@ func DisplayWorkloadTable(nodes map[string]cluster.Node, oneYearDiscount float64
 		}
 	}
 
-	rows = append(rows, table.Row{"Total cost per cluster per hour", "", "", "", "", "", "", "", strconv.FormatFloat(totalCost, 'G', 7, 64)})
-	rows = append(rows, table.Row{"... 1 year commit", "", "", "", "", "", "", "", strconv.FormatFloat(totalCostSpot+totalCost*oneYearDiscount, 'G', 7, 64)})
-	rows = append(rows, table.Row{"... with 3 year commit", "", "", "", "", "", "", "", strconv.FormatFloat(totalCostSpot+totalCost*threeYearDiscount, 'G', 7, 64)})
+	rows = append(rows, table.Row{"Total cost per cluster per hour", "", "", "", "", "", "", "", strconv.FormatFloat(totalCost+clusterFee, 'G', 7, 64)})
+	rows = append(rows, table.Row{"... 1 year commit", "", "", "", "", "", "", "", strconv.FormatFloat((totalCostSpot+totalCost*oneYearDiscount)+clusterFee, 'G', 7, 64)})
+	rows = append(rows, table.Row{"... with 3 year commit", "", "", "", "", "", "", "", strconv.FormatFloat((totalCostSpot+totalCost*threeYearDiscount)+clusterFee, 'G', 7, 64)})
 
 	tbl := table.New(
 		table.WithColumns(columns),

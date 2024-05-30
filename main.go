@@ -87,7 +87,11 @@ func main() {
 		log.Fatalf("Error getting cluster nodes: %v", err)
 	}
 
-	pricingService, err := calculator.NewService(cfg.Section("").Key("autopilot_sku").String(), clusterRegion, clientset, metricsClientset, cfg)
+	pricingSKUs := map[string]string{
+		"autopilot": cfg.Section("").Key("autopilot_sku").String(),
+		"gce":       cfg.Section("").Key("gce_sku").String(),
+	}
+	pricingService, err := calculator.NewService(pricingSKUs, clusterRegion, clientset, metricsClientset, cfg)
 	if err != nil {
 		log.Fatalf("Error initializing pricing service: %v", err)
 	}
@@ -135,6 +139,12 @@ func main() {
 		fmt.Println(greenTextStyle.Render(fmt.Sprintf("%d workloads from your cluster (%s) mapped to GKE Autopilot mode.", len(workloads), clusterName)))
 		fmt.Println()
 		fmt.Println(redTextStyle.Render("Displayed values for mCPU, Memory and Storage are a snapshot of this point in time. Those are not requets/limits but currently used values"))
-		DisplayWorkloadTable(nodes, oneYearDiscount, threeYearDiscount)
+
+		cluster_fee, err := cfg.Section("fees").Key("cluster_fee").Float64()
+		if err != nil {
+			cluster_fee = calculator.CLUSTER_FEE
+		}
+
+		DisplayWorkloadTable(nodes, oneYearDiscount, threeYearDiscount, cluster_fee)
 	}
 }

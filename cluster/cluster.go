@@ -31,23 +31,28 @@ import (
 type ComputeClass int8
 
 const (
-	ComputeClassRegular     ComputeClass = 0
-	ComputeClassBalanced    ComputeClass = 1
-	ComputeClassScaleout    ComputeClass = 2
-	ComputeClassScaleoutArm ComputeClass = 3
+	ComputeClassGeneralPurpose ComputeClass = 0
+	ComputeClassBalanced       ComputeClass = 1
+	ComputeClassScaleout       ComputeClass = 2
+	ComputeClassScaleoutArm    ComputeClass = 3
+	ComputeClassPerformance    ComputeClass = 4
+	ComputeClassAccelerator    ComputeClass = 5
+	ComputeClassGPUPod         ComputeClass = 6
 )
 
-var ComputeClasses [4]string = [4]string{"Regular", "Balanced", "Scale-out", "Scale-out arm64"}
+var ComputeClasses [7]string = [7]string{"General-purpose", "Balanced", "Scale-out", "Scale-out arm64", "Performance", "Accelerator", "GPU Pod"}
 
 type Workload struct {
-	Name         string
-	Node_name    string
-	Containers   int
-	Cpu          int64
-	Memory       int64
-	Storage      int64
-	Cost         float64
-	ComputeClass ComputeClass
+	Name              string
+	Node_name         string
+	Containers        int
+	Cpu               int64
+	Memory            int64
+	Storage           int64
+	AcceleratorType   string
+	AcceleratorAmount int64
+	Cost              float64
+	ComputeClass      ComputeClass
 }
 
 type Node struct {
@@ -57,6 +62,7 @@ type Node struct {
 	Region       string
 	Spot         bool
 	Cost         float64
+	Accelerator  string
 }
 
 func GetKubeConfig() (*rest.Config, string, error) {
@@ -107,6 +113,7 @@ func GetClusterNodes(clientset *kubernetes.Clientset) (map[string]Node, error) {
 			Name:         clusterNode.Name,
 			Region:       clusterNode.Labels["topology.kubernetes.io/region"],
 			Spot:         clusterNode.Labels["cloud.google.com/gke-spot"] == "true",
+			Accelerator:  clusterNode.Labels["cloud.google.com/gke-accelerator"],
 			InstanceType: clusterNode.Labels["beta.kubernetes.io/instance-type"]}
 	}
 

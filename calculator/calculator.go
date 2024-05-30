@@ -19,12 +19,10 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"strconv"
 	"strings"
 
 	"github.com/GoogleCloudPlatform/autopilot-cost-calculator/cluster"
-	"golang.org/x/exp/slices"
-	"google.golang.org/api/cloudbilling/v1"
-	"google.golang.org/api/option"
 	"gopkg.in/ini.v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -33,49 +31,29 @@ import (
 )
 
 const CLUSTER_FEE = 0.1
-const ARM_TYPE_PREFIX = "t2a-"
-
-type PriceList struct {
-	// generic for all
-	Region       string
-	StoragePrice float64
-
-	// regular pricing
-	CpuPrice               float64
-	MemoryPrice            float64
-	CpuBalancedPrice       float64
-	MemoryBalancedPrice    float64
-	CpuScaleoutPrice       float64
-	MemoryScaleoutPrice    float64
-	CpuArmScaleoutPrice    float64
-	MemoryArmScaleoutPrice float64
-
-	// spot pricing
-	SpotCpuPrice               float64
-	SpotMemoryPrice            float64
-	SpotCpuBalancedPrice       float64
-	SpotMemoryBalancedPrice    float64
-	SpotCpuScaleoutPrice       float64
-	SpotMemoryScaleoutPrice    float64
-	SpotArmCpuScaleoutPrice    float64
-	SpotArmMemoryScaleoutPrice float64
-}
 
 type PricingService struct {
-	Pricing          PriceList
+	AutopilotPricing AutopilotPriceList
+	GCEPricing       GCEPriceList
 	Config           *ini.File
 	clientset        *kubernetes.Clientset
 	metricsClientset *metricsv.Clientset
 }
 
-func NewService(sku string, region string, clientset *kubernetes.Clientset, metricsClientset *metricsv.Clientset, config *ini.File) (*PricingService, error) {
-	pricing, err := GetAutopilotPricing(sku, region)
+func NewService(sku map[string]string, region string, clientset *kubernetes.Clientset, metricsClientset *metricsv.Clientset, config *ini.File) (*PricingService, error) {
+	apPricing, err := GetAutopilotPricing(sku["autopilot"], region)
+	if err != nil {
+		return nil, err
+	}
+
+	gcePricing, err := GetGCEPricing(sku["gce"], region)
 	if err != nil {
 		return nil, err
 	}
 
 	service := &PricingService{
-		Pricing:          pricing,
+		AutopilotPricing: apPricing,
+		GCEPricing:       gcePricing,
 		clientset:        clientset,
 		metricsClientset: metricsClientset,
 		Config:           config,
@@ -84,37 +62,202 @@ func NewService(sku string, region string, clientset *kubernetes.Clientset, metr
 	return service, nil
 }
 
-func (service *PricingService) CalculatePricing(cpu int64, memory int64, storage int64, class cluster.ComputeClass, spot bool) float64 {
+func (service *PricingService) CalculatePricing(cpu int64, memory int64, storage int64, gpu int64, gpuModel string, class cluster.ComputeClass, instanceType string, spot bool) float64 {
 	// If spot, calculations are done based on spot pricing
 	if spot {
 		switch class {
-		case cluster.ComputeClassBalanced:
-			return service.Pricing.SpotCpuPrice*float64(cpu)/1000 + service.Pricing.SpotMemoryPrice*float64(memory)/1000 + service.Pricing.StoragePrice*float64(storage)/1000
-		case cluster.ComputeClassScaleout:
-			return service.Pricing.SpotCpuScaleoutPrice*float64(cpu)/1000 + service.Pricing.SpotMemoryScaleoutPrice*float64(memory)/1000 + service.Pricing.StoragePrice*float64(storage)/1000
-		case cluster.ComputeClassScaleoutArm:
-			if service.Pricing.SpotArmCpuScaleoutPrice == 0 || service.Pricing.SpotArmMemoryScaleoutPrice == 0 {
-				log.Printf("ARM pricing is not available in this %s region.", service.Pricing.Region)
+		case cluster.ComputeClassPerformance:
+			perfPrice := service.AutopilotPricing.SpotPerformanceCpuPricePremium*float64(cpu)/1000 + service.AutopilotPricing.SpotPerformanceMemoryPricePremium*float64(memory)/1000 + service.AutopilotPricing.SpotPerformanceLocalSSDPricePremium*float64(storage)/1000
+			if perfPrice == 0 {
+				log.Printf("Requested Spot Performance (%s) pricing is not available in %s region.", instanceType, service.AutopilotPricing.Region)
 			}
-			return service.Pricing.SpotArmCpuScaleoutPrice*float64(cpu)/1000 + service.Pricing.SpotArmMemoryScaleoutPrice*float64(memory)/1000 + service.Pricing.StoragePrice*float64(storage)/1000
+
+			gcePrice, _ := service.GetGCEMachinePrice(instanceType, spot)
+
+			return perfPrice + gcePrice
+		case cluster.ComputeClassAccelerator:
+			// TODO lookup machine type and add to the price
+			acceleratorPrice := service.AutopilotPricing.SpotAcceleratorCpuPricePremium*float64(cpu)/1000 + service.AutopilotPricing.SpotAcceleratorMemoryGPUPricePremium*float64(memory)/1000 + service.AutopilotPricing.AcceleratorLocalSSDPricePremium*float64(storage)/1000
+			switch gpuModel {
+			case "nvidia-tesla-t4":
+				acceleratorPrice += service.AutopilotPricing.SpotAcceleratorT4GPUPricePremium * float64(gpu)
+			case "nvidia-l4":
+				acceleratorPrice += service.AutopilotPricing.SpotAcceleratorL4GPUPricePremium * float64(gpu)
+			case "nvidia-tesla-a100":
+				acceleratorPrice += service.AutopilotPricing.SpotAcceleratorA10040GGPUPricePremium * float64(gpu)
+			case "nvidia-a100-80gb":
+				acceleratorPrice += service.AutopilotPricing.SpotAcceleratorA10080GGPUPricePremium * float64(gpu)
+			case "nvidia-h100-80gb":
+				acceleratorPrice += service.AutopilotPricing.SpotAcceleratorH100GPUPricePremium * float64(gpu)
+			default:
+				acceleratorPrice = 0
+				log.Printf("Requested Spot GPU (%s) pricing for Accelerator compute class (%s) is not available in %s region.", gpuModel, instanceType, service.AutopilotPricing.Region)
+			}
+
+			gcePrice, _ := service.GetGCEMachinePrice(instanceType, spot)
+			return acceleratorPrice + gcePrice
+
+		case cluster.ComputeClassGPUPod:
+			acceleratorPrice := service.AutopilotPricing.SpotGPUPodvCPUPrice*float64(cpu)/1000 + service.AutopilotPricing.SpotGPUPodMemoryPrice*float64(memory)/1000 + service.AutopilotPricing.SpotGPUPodLocalSSDPrice*float64(storage)/1000
+			switch gpuModel {
+			case "nvidia-tesla-t4":
+				acceleratorPrice += service.AutopilotPricing.SpotNVIDIAT4PodGPUPrice * float64(gpu)
+			case "nvidia-l4":
+				acceleratorPrice += service.AutopilotPricing.SpotNVIDIAL4PodGPUPrice * float64(gpu)
+			case "nvidia-tesla-a100":
+				acceleratorPrice += service.AutopilotPricing.SpotNVIDIAA10040GPodGPUPrice * float64(gpu)
+			case "nvidia-a100-80gb":
+				acceleratorPrice += service.AutopilotPricing.SpotNVIDIAA10080GPodGPUPrice * float64(gpu)
+			default:
+				acceleratorPrice = 0
+				log.Printf("Requested Spot GPU (%s) pricing is not available in %s region.", gpuModel, service.AutopilotPricing.Region)
+			}
+			return acceleratorPrice
+
+		case cluster.ComputeClassBalanced:
+			return service.AutopilotPricing.SpotCpuPrice*float64(cpu)/1000 + service.AutopilotPricing.SpotMemoryPrice*float64(memory)/1000 + service.AutopilotPricing.StoragePrice*float64(storage)/1000
+
+		case cluster.ComputeClassScaleout:
+			return service.AutopilotPricing.SpotCpuScaleoutPrice*float64(cpu)/1000 + service.AutopilotPricing.SpotMemoryScaleoutPrice*float64(memory)/1000 + service.AutopilotPricing.StoragePrice*float64(storage)/1000
+
+		case cluster.ComputeClassScaleoutArm:
+			armPrice := service.AutopilotPricing.SpotArmCpuScaleoutPrice*float64(cpu)/1000 + service.AutopilotPricing.SpotArmMemoryScaleoutPrice*float64(memory)/1000 + service.AutopilotPricing.StoragePrice*float64(storage)/1000
+			if armPrice == 0 {
+				log.Printf("Request Spot ARM (%s) pricing is not available in %s region.", instanceType, service.AutopilotPricing.Region)
+			}
+			return armPrice
+
 		default:
-			return service.Pricing.SpotCpuPrice*float64(cpu)/1000 + service.Pricing.SpotMemoryPrice*float64(memory)/1000 + service.Pricing.StoragePrice*float64(storage)/1000
+			return service.AutopilotPricing.SpotCpuPrice*float64(cpu)/1000 + service.AutopilotPricing.SpotMemoryPrice*float64(memory)/1000 + service.AutopilotPricing.StoragePrice*float64(storage)/1000
 		}
 	}
 
 	switch class {
-	case cluster.ComputeClassBalanced:
-		return service.Pricing.CpuBalancedPrice*float64(cpu)/1000 + service.Pricing.MemoryBalancedPrice*float64(memory)/1000 + service.Pricing.StoragePrice*float64(storage)/1000
-	case cluster.ComputeClassScaleout:
-		return service.Pricing.CpuScaleoutPrice*float64(cpu)/1000 + service.Pricing.MemoryScaleoutPrice*float64(memory)/1000 + service.Pricing.StoragePrice*float64(storage)/1000
-	case cluster.ComputeClassScaleoutArm:
-		if service.Pricing.CpuArmScaleoutPrice == 0 || service.Pricing.MemoryArmScaleoutPrice == 0 {
-			log.Printf("ARM pricing is not available in this %s region.", service.Pricing.Region)
+	case cluster.ComputeClassPerformance:
+		perfPrice := service.AutopilotPricing.PerformanceCpuPricePremium*float64(cpu)/1000 + service.AutopilotPricing.PerformanceMemoryPricePremium*float64(memory)/1000 + service.AutopilotPricing.PerformanceLocalSSDPricePremium*float64(storage)/1000
+		if perfPrice == 0 {
+			log.Printf("Requested Performance(%s) pricing is not available in %s region.", instanceType, service.AutopilotPricing.Region)
 		}
-		return service.Pricing.CpuArmScaleoutPrice*float64(cpu)/1000 + service.Pricing.MemoryArmScaleoutPrice*float64(memory)/1000 + service.Pricing.StoragePrice*float64(storage)/1000
+
+		gcePrice, _ := service.GetGCEMachinePrice(instanceType, spot)
+		return perfPrice + gcePrice
+	case cluster.ComputeClassAccelerator:
+		acceleratorPrice := service.AutopilotPricing.AcceleratorCpuPricePremium*float64(cpu)/1000 + service.AutopilotPricing.AcceleratorMemoryGPUPricePremium*float64(memory)/1000 + service.AutopilotPricing.AcceleratorLocalSSDPricePremium*float64(storage)/1000
+		switch gpuModel {
+		case "nvidia-tesla-t4":
+			acceleratorPrice += service.AutopilotPricing.AcceleratorT4GPUPricePremium * float64(gpu)
+		case "nvidia-l4":
+			acceleratorPrice += service.AutopilotPricing.AcceleratorL4GPUPricePremium * float64(gpu)
+		case "nvidia-tesla-a100":
+			acceleratorPrice += service.AutopilotPricing.AcceleratorA10040GGPUPricePremium * float64(gpu)
+		case "nvidia-a100-80gb":
+			acceleratorPrice += service.AutopilotPricing.AcceleratorA10080GGPUPricePremium * float64(gpu)
+		case "nvidia-h100-80gb":
+			acceleratorPrice += service.AutopilotPricing.AcceleratorH100GPUPricePremium * float64(gpu)
+		default:
+			acceleratorPrice = 0
+			log.Printf("Requested spot GPU (%s) pricing for Accelerator compute class (%s) is not available in %s region.", gpuModel, instanceType, service.AutopilotPricing.Region)
+		}
+
+		gcePrice, _ := service.GetGCEMachinePrice(instanceType, spot)
+
+		return acceleratorPrice + gcePrice
+	case cluster.ComputeClassGPUPod:
+		acceleratorPrice := service.AutopilotPricing.GPUPodvCPUPrice*float64(cpu)/1000 + service.AutopilotPricing.GPUPodMemoryPrice*float64(memory)/1000 + service.AutopilotPricing.GPUPodLocalSSDPrice*float64(storage)/1000
+		switch gpuModel {
+		case "nvidia-tesla-t4":
+			acceleratorPrice += service.AutopilotPricing.NVIDIAT4PodGPUPrice * float64(gpu)
+		case "nvidia-l4":
+			acceleratorPrice += service.AutopilotPricing.NVIDIAL4PodGPUPrice * float64(gpu)
+		case "nvidia-tesla-a100":
+			acceleratorPrice += service.AutopilotPricing.NVIDIAA10040GPodGPUPrice * float64(gpu)
+		case "nvidia-a100-80gb":
+			acceleratorPrice += service.AutopilotPricing.NVIDIAA10080GPodGPUPrice * float64(gpu)
+		default:
+			acceleratorPrice = 0
+			log.Printf("Requested GPU (%s) pricing is not available in %s region.", gpuModel, service.AutopilotPricing.Region)
+		}
+		return acceleratorPrice
+	case cluster.ComputeClassBalanced:
+		return service.AutopilotPricing.CpuBalancedPrice*float64(cpu)/1000 + service.AutopilotPricing.MemoryBalancedPrice*float64(memory)/1000 + service.AutopilotPricing.StoragePrice*float64(storage)/1000
+	case cluster.ComputeClassScaleout:
+		return service.AutopilotPricing.CpuScaleoutPrice*float64(cpu)/1000 + service.AutopilotPricing.MemoryScaleoutPrice*float64(memory)/1000 + service.AutopilotPricing.StoragePrice*float64(storage)/1000
+	case cluster.ComputeClassScaleoutArm:
+		armPrice := service.AutopilotPricing.CpuArmScaleoutPrice*float64(cpu)/1000 + service.AutopilotPricing.MemoryArmScaleoutPrice*float64(memory)/1000 + service.AutopilotPricing.StoragePrice*float64(storage)/1000
+		if armPrice == 0 {
+			log.Printf("Request ARM (%s) pricing is not available in %s region.", instanceType, service.AutopilotPricing.Region)
+		}
+		return armPrice
 	default:
-		return service.Pricing.CpuPrice*float64(cpu)/1000 + service.Pricing.MemoryPrice*float64(memory)/1000 + service.Pricing.StoragePrice*float64(storage)/1000
+		return service.AutopilotPricing.CpuPrice*float64(cpu)/1000 + service.AutopilotPricing.MemoryPrice*float64(memory)/1000 + service.AutopilotPricing.StoragePrice*float64(storage)/1000
 	}
+}
+
+func (service *PricingService) GetGCEMachinePrice(instanceType string, spot bool) (float64, error) {
+
+	instanceInfo := strings.Split(instanceType, "-")
+	cpus, _ := strconv.Atoi(instanceInfo[2])
+	ram := 0.0
+	classType := instanceInfo[1]
+	machineType := instanceInfo[0]
+
+	switch classType {
+	case "standard":
+		ram = float64(cpus) * 4
+	case "highcpu":
+		ram = float64(cpus) * 2
+	case "highmem":
+		ram = float64(cpus) * 4
+	case "highgpu":
+		ram = float64(cpus) * 7.0833
+	case "ultragpu":
+		ram = float64(cpus) * 14.1666
+	}
+
+	ram = math.Ceil(ram)
+	fmt.Printf("Parsing %s - %d %f %s %s", instanceType, cpus, ram, machineType, classType)
+
+	if spot {
+		switch machineType {
+		case "a2":
+			return service.GCEPricing.SpotA2CpuPrice*float64(cpus) + service.GCEPricing.SpotA2MemoryPrice*ram, nil
+		case "a3":
+			return service.GCEPricing.SpotA3CpuPrice*float64(cpus) + service.GCEPricing.SpotA3MemoryPrice*ram, nil
+		case "g2":
+			return service.GCEPricing.SpotG2DCpuPrice*float64(cpus) + service.GCEPricing.SpotG2DMemoryPrice*ram, nil
+		case "h3":
+			fmt.Printf("H3 Machine type is not available in Preemptible Spot format. Defaulting to a regular price.")
+			return service.GCEPricing.H3CpuPrice*float64(cpus) + service.GCEPricing.H3MemoryPrice*ram, nil
+		case "c2":
+			return service.GCEPricing.SpotC2CpuPrice*float64(cpus) + service.GCEPricing.SpotC2MemoryPrice*ram, nil
+		case "c2d":
+			return service.GCEPricing.SpotC2DCpuPrice*float64(cpus) + service.GCEPricing.SpotC2DMemoryPrice*ram, nil
+		default:
+			fmt.Printf("GCE Machine type %s is not implemented for price querying. Only supported ones are A2, A3, G2, H3, C2 and C2D", instanceType)
+		}
+		return 0, nil
+	}
+
+	fmt.Printf("%#v", service.GCEPricing)
+
+	switch machineType {
+	case "a2":
+		return service.GCEPricing.A2CpuPrice*float64(cpus) + service.GCEPricing.A2MemoryPrice*ram, nil
+	case "a3":
+		return service.GCEPricing.A3CpuPrice*float64(cpus) + service.GCEPricing.A3MemoryPrice*ram, nil
+	case "g2":
+		return service.GCEPricing.G2CpuPrice*float64(cpus) + service.GCEPricing.G2MemoryPrice*ram, nil
+	case "h3":
+		return service.GCEPricing.H3CpuPrice*float64(cpus) + service.GCEPricing.H3MemoryPrice*ram, nil
+	case "c2":
+		return service.GCEPricing.C2CpuPrice*float64(cpus) + service.GCEPricing.C2MemoryPrice*ram, nil
+	case "c2d":
+		return service.GCEPricing.C2DCpuPrice*float64(cpus) + service.GCEPricing.C2DMemoryPrice*ram, nil
+	default:
+		fmt.Printf("GCE Machine type %s is not implemented for price querying. Only supported ones are A2, A3, G2, H3, C2 and C2D", instanceType)
+	}
+
+	return 0, nil
 }
 
 func (service *PricingService) PopulateWorkloads(nodes map[string]cluster.Node) ([]cluster.Workload, error) {
@@ -131,14 +274,13 @@ func (service *PricingService) PopulateWorkloads(nodes map[string]cluster.Node) 
 			return nil, err
 		}
 
-		if err != nil {
-			return nil, err
-		}
-
 		var cpu int64 = 0
 		var memory int64 = 0
 		var storage int64 = 0
+		var gpu int64 = 0
 		podContainerCount := 0
+
+		gpuModel := pod.Spec.NodeSelector["cloud.google.com/gke-accelerator"]
 
 		// Sum used resources from the Pod
 		for _, container := range v.Containers {
@@ -146,12 +288,14 @@ func (service *PricingService) PopulateWorkloads(nodes map[string]cluster.Node) 
 			cpuUsage := container.Usage.Cpu().MilliValue()
 			memoryUsage := container.Usage.Memory().MilliValue() / 1000000000            // Division to get MiB
 			storageUsage := container.Usage.StorageEphemeral().MilliValue() / 1000000000 // Division to get MiB
+			gpuUsage := int64(0)
 
 			for _, specContainer := range pod.Spec.Containers {
 				if container.Name == specContainer.Name {
 					cpuRequest := specContainer.Resources.Requests[corev1.ResourceCPU]
 					memoryRequest := specContainer.Resources.Requests[corev1.ResourceMemory]
 					storageRequest := specContainer.Resources.Requests[corev1.ResourceStorage]
+					gpuRequests := specContainer.Resources.Requests["nvidia.com/gpu"]
 
 					// Usage is less than requests, so we set request as usage since the billing works like that
 					if cpuUsage < cpuRequest.MilliValue() {
@@ -165,12 +309,15 @@ func (service *PricingService) PopulateWorkloads(nodes map[string]cluster.Node) 
 					if storageUsage < storageRequest.MilliValue()/1000000000 {
 						storageUsage = memoryRequest.MilliValue() / 1000000000
 					}
+
+					gpuUsage = gpuRequests.Value()
 				}
 			}
 
 			cpu += cpuUsage
 			memory += memoryUsage
 			storage += storageUsage
+			gpu += gpuUsage
 			podContainerCount++
 		}
 
@@ -179,22 +326,27 @@ func (service *PricingService) PopulateWorkloads(nodes map[string]cluster.Node) 
 
 		computeClass := service.DecideComputeClass(
 			v.Name,
+			nodes[pod.Spec.NodeName].InstanceType,
 			cpu,
 			memory,
+			gpu,
+			gpuModel,
 			strings.Contains(nodes[pod.Spec.NodeName].InstanceType, service.Config.Section("").Key("gce_arm64_prefix").String()),
 		)
 
-		cost := service.CalculatePricing(cpu, memory, storage, computeClass, nodes[pod.Spec.NodeName].Spot)
+		cost := service.CalculatePricing(cpu, memory, storage, gpu, gpuModel, computeClass, nodes[pod.Spec.NodeName].InstanceType, nodes[pod.Spec.NodeName].Spot)
 
 		workloadObject := cluster.Workload{
-			Name:         v.Name,
-			Containers:   podContainerCount,
-			Node_name:    pod.Spec.NodeName,
-			Cpu:          cpu,
-			Memory:       memory,
-			Storage:      storage,
-			Cost:         cost,
-			ComputeClass: computeClass,
+			Name:              v.Name,
+			Containers:        podContainerCount,
+			Node_name:         pod.Spec.NodeName,
+			Cpu:               cpu,
+			Memory:            memory,
+			Storage:           storage,
+			AcceleratorType:   gpuModel,
+			AcceleratorAmount: gpu,
+			Cost:              cost,
+			ComputeClass:      computeClass,
 		}
 
 		workloads = append(workloads, workloadObject)
@@ -211,28 +363,126 @@ func (service *PricingService) PopulateWorkloads(nodes map[string]cluster.Node) 
 
 }
 
-func (service *PricingService) DecideComputeClass(workloadName string, mCPU int64, memory int64, arm64 bool) cluster.ComputeClass {
+func (service *PricingService) DecideComputeClass(workloadName string, machineType string, mCPU int64, memory int64, gpu int64, gpuModel string, arm64 bool) cluster.ComputeClass {
 	ratio := math.Ceil(float64(memory) / float64(mCPU))
 
-	ratioRegularMin, _ := service.Config.Section("ratios").Key("regular_min").Float64()
-	ratioRegularMax, _ := service.Config.Section("ratios").Key("regular_max").Float64()
+	ratioRegularMin, _ := service.Config.Section("ratios").Key("generalpurpose_min").Float64()
+	ratioRegularMax, _ := service.Config.Section("ratios").Key("generalpurpose_max").Float64()
 	ratioBalancedMin, _ := service.Config.Section("ratios").Key("balanced_min").Float64()
 	ratioBalancedMax, _ := service.Config.Section("ratios").Key("balanced_max").Float64()
 	ratioScaleoutMin, _ := service.Config.Section("ratios").Key("scaleout_min").Float64()
 	ratioScaleoutMax, _ := service.Config.Section("ratios").Key("scaleout_max").Float64()
+	ratioPerformanceMin, _ := service.Config.Section("ratios").Key("performance_min").Float64()
+	ratioPerformanceMax, _ := service.Config.Section("ratios").Key("performance_max").Float64()
 
 	scaleoutMcpuMax, _ := service.Config.Section("limits").Key("scaleout_mcpu_max").Int64()
 	scaleoutMemoryMax, _ := service.Config.Section("limits").Key("scaleout_memory_max").Int64()
 	scaleoutArmMcpuMax, _ := service.Config.Section("limits").Key("scaleout_arm_mcpu_max").Int64()
 	scaleoutArmMemoryMax, _ := service.Config.Section("limits").Key("scaleout_arm_memory_max").Int64()
-	regularMcpuMax, _ := service.Config.Section("limits").Key("regular_mcpu_max").Int64()
-	regularMemoryMax, _ := service.Config.Section("limits").Key("regular_memory_max").Int64()
+	regularMcpuMax, _ := service.Config.Section("limits").Key("generalpurpose_mcpu_max").Int64()
+	regularMemoryMax, _ := service.Config.Section("limits").Key("generalpurpose_memory_max").Int64()
 	balancedMcpuMax, _ := service.Config.Section("limits").Key("balanced_mcpu_max").Int64()
 	balancedMemoryMax, _ := service.Config.Section("limits").Key("balanced_mcpu_max").Int64()
+	performanceMcpuMax, _ := service.Config.Section("limits").Key("performance_mcpu_max").Int64()
+	performanceMemoryMax, _ := service.Config.Section("limits").Key("performance_memory_max").Int64()
+
+	gpupodT4McpuMin, _ := service.Config.Section("limits").Key("gpupod_t4_mcpu_min").Int64()
+	gpupodT4McpuMax, _ := service.Config.Section("limits").Key("gpupod_t4_mcpu_max").Int64()
+	gpupodT4MemoryMin, _ := service.Config.Section("limits").Key("gpupod_t4_memory_min").Int64()
+	gpupodT4MemoryMax, _ := service.Config.Section("limits").Key("gpupod_t4_memory_max").Int64()
+
+	gpupodL4McpuMin, _ := service.Config.Section("limits").Key("gpupod_l4_mcpu_min").Int64()
+	gpupodL4McpuMax, _ := service.Config.Section("limits").Key("gpupod_l4_mcpu_max").Int64()
+	gpupodL4MemoryMin, _ := service.Config.Section("limits").Key("gpupod_l4_memory_min").Int64()
+	gpupodL4MemoryMax, _ := service.Config.Section("limits").Key("gpupod_l4_memory_max").Int64()
+
+	gpupodA10040McpuMin, _ := service.Config.Section("limits").Key("gpupod_a100_40_mcpu_min").Int64()
+	gpupodA10040McpuMax, _ := service.Config.Section("limits").Key("gpupod_a100_40_mcpu_max").Int64()
+	gpupodA10040MemoryMin, _ := service.Config.Section("limits").Key("gpupod_a100_40_memory_min").Int64()
+	gpupodA10040MemoryMax, _ := service.Config.Section("limits").Key("gpupod_a100_40_memory_max").Int64()
+
+	gpupodA10080McpuMin, _ := service.Config.Section("limits").Key("gpupod_a100_80_mcpu_min").Int64()
+	gpupodA10080McpuMax, _ := service.Config.Section("limits").Key("gpupod_a100_80_mcpu_max").Int64()
+	gpupodA10080MemoryMin, _ := service.Config.Section("limits").Key("gpupod_a100_80_memory_min").Int64()
+	gpupodA10080MemoryMax, _ := service.Config.Section("limits").Key("gpupod_a100_80_memory_max").Int64()
+
+	accelerator_mcpu_min, _ := service.Config.Section("limits").Key("accelerator_mcpu_min").Int64()
+	accelerator_memory_min, _ := service.Config.Section("limits").Key("accelerator_memory_min").Int64()
+	accelerator_h100_80_mcpu_max, _ := service.Config.Section("limits").Key("accelerator_h100_80_mcpu_max").Int64()
+	accelerator_h100_80_memory_max, _ := service.Config.Section("limits").Key("accelerator_h100_80_memory_max").Int64()
+
+	computeOptimizedMachineTypes := strings.Split(service.Config.Section("").Key("gce_compute_optimized_prefixed").String(), ",")
+	for _, computeOptimizedMachineType := range computeOptimizedMachineTypes {
+		if strings.Contains(machineType, computeOptimizedMachineType) {
+			return cluster.ComputeClassPerformance
+		}
+	}
+
+	// check if GPU is H100, then return ComputeClassAccelerator since it's the only one supporting these GPUs
+	if gpuModel == service.Config.Section("").Key("nvidia_h100_identifier").String() {
+		if ratio < ratioPerformanceMin || ratio > ratioPerformanceMax || mCPU > performanceMcpuMax || memory > performanceMemoryMax {
+			log.Printf("Requested memory or CPU out of acceptable range for Performance compute class (%s) workload (%s).\n", machineType, workloadName)
+		}
+
+		return cluster.ComputeClassPerformance
+	}
+
+	acceleratorOptimizedMachineTypes := strings.Split(service.Config.Section("").Key("gce_accelerator_optimized_prefixed").String(), ",")
+	for _, acceleratorOptimizedMachineType := range acceleratorOptimizedMachineTypes {
+		if strings.Contains(machineType, acceleratorOptimizedMachineType) {
+			switch gpuModel {
+			case "nvidia-tesla-t4":
+				if mCPU > gpupodT4McpuMax || mCPU < accelerator_mcpu_min || memory > gpupodT4MemoryMax || memory < accelerator_memory_min {
+					log.Printf("Requested memory or CPU out of acceptable range for %s Accelerator compute class (%s) workload (%s).\n", machineType, gpuModel, workloadName)
+				}
+			case "nvidia-l4":
+				if mCPU > gpupodL4McpuMax || mCPU < accelerator_mcpu_min || memory > gpupodL4MemoryMax || memory < accelerator_memory_min {
+					log.Printf("Requested memory or CPU out of acceptable range for %s Accelerator compute class (%s) workload (%s).\n", machineType, gpuModel, workloadName)
+				}
+			case "nvidia-tesla-a100":
+				if mCPU > gpupodA10040McpuMax || mCPU < accelerator_mcpu_min || memory > gpupodA10040MemoryMax || memory < accelerator_memory_min {
+					log.Printf("Requested memory or CPU out of acceptable range for %s Accelerator compute class (%s) workload (%s).\n", machineType, gpuModel, workloadName)
+				}
+			case "nvidia-a100-80gb":
+				if mCPU > gpupodA10080McpuMax || mCPU < accelerator_mcpu_min || memory > gpupodA10080MemoryMax || memory < accelerator_memory_min {
+					log.Printf("Requested memory or CPU out of acceptable range for %s Accelerator compute class (%s) workload (%s).\n", machineType, gpuModel, workloadName)
+				}
+			case "nvidia-h100-80gb":
+				if mCPU > accelerator_h100_80_mcpu_max || mCPU < accelerator_mcpu_min || memory > accelerator_h100_80_memory_max || memory < accelerator_memory_min {
+					log.Printf("Requested memory or CPU out of acceptable range for %s Accelerator compute class (%s) workload (%s).\n", machineType, gpuModel, workloadName)
+				}
+			}
+
+			return cluster.ComputeClassAccelerator
+		}
+	}
+
+	// Ok, not an accelerator based workload nor is H100, so we can get a regular GPU Pod type
+	if gpu > 0 {
+		switch gpuModel {
+		case "nvidia-tesla-t4":
+			if mCPU > gpupodT4McpuMax || mCPU < gpupodT4McpuMin || memory > gpupodT4MemoryMax || memory < gpupodT4MemoryMin {
+				log.Printf("Requested memory or CPU out of acceptable range for %s GPU workload (%s).\n", gpuModel, workloadName)
+			}
+		case "nvidia-l4":
+			if mCPU > gpupodL4McpuMax || mCPU < gpupodL4McpuMin || memory > gpupodL4MemoryMax || memory < gpupodL4MemoryMin {
+				log.Printf("Requested memory or CPU out of acceptable range for %s GPU workload (%s).\n", gpuModel, workloadName)
+			}
+		case "nvidia-tesla-a100":
+			if mCPU > gpupodA10040McpuMax || mCPU < gpupodA10040McpuMin || memory > gpupodA10040MemoryMax || memory < gpupodA10040MemoryMin {
+				log.Printf("Requested memory or CPU out of acceptable range for %s GPU workload (%s).\n", gpuModel, workloadName)
+			}
+		case "nvidia-a100-80gb":
+			if mCPU > gpupodA10080McpuMax || mCPU < gpupodA10080McpuMin || memory > gpupodA10080MemoryMax || memory < gpupodA10080MemoryMin {
+				log.Printf("Requested memory or CPU out of acceptable range for %s GPU workload (%s).\n", gpuModel, workloadName)
+			}
+		}
+		return cluster.ComputeClassGPUPod
+	}
 
 	// ARM64 is still experimental
 	if arm64 {
-		if ratio < ratioScaleoutMin || ratio > ratioScaleoutMax || mCPU > scaleoutArmMcpuMax || memory > int64(scaleoutArmMemoryMax) {
+		if ratio < ratioScaleoutMin || ratio > ratioScaleoutMax || mCPU > scaleoutArmMcpuMax || memory > scaleoutArmMemoryMax {
 			log.Printf("Requesting arm64 but requested mCPU () or memory or ratio are out of accepted range(%s).\n", workloadName)
 		}
 
@@ -241,7 +491,7 @@ func (service *PricingService) DecideComputeClass(workloadName string, mCPU int6
 
 	// For T2a machines, default to scale-out compute class, since it's the only one supporting it
 	if ratio >= ratioRegularMin && ratio <= ratioRegularMax && mCPU <= regularMcpuMax && memory <= regularMemoryMax {
-		return cluster.ComputeClassRegular
+		return cluster.ComputeClassGeneralPurpose
 	}
 
 	// If we are out of Regular range, suggest Scale-Out
@@ -254,156 +504,35 @@ func (service *PricingService) DecideComputeClass(workloadName string, mCPU int6
 		return cluster.ComputeClassBalanced
 	}
 
-	log.Printf("Couldn't find a matching compute class for %s. Defaulting to 'Regular'. Please check manually.\n", workloadName)
+	log.Printf("Couldn't find a matching compute class for %s. Defaulting to 'General-purpose'. Please check the pricing manually.\n", workloadName)
 
-	return cluster.ComputeClassRegular
+	return cluster.ComputeClassGeneralPurpose
 }
 
-func GetAutopilotPricing(sku string, region string) (PriceList, error) {
-	// Init all to zeroes
-	pricing := PriceList{
-		Region:                     region,
-		StoragePrice:               0,
-		CpuPrice:                   0,
-		MemoryPrice:                0,
-		CpuBalancedPrice:           0,
-		MemoryBalancedPrice:        0,
-		CpuScaleoutPrice:           0,
-		MemoryScaleoutPrice:        0,
-		CpuArmScaleoutPrice:        0,
-		MemoryArmScaleoutPrice:     0,
-		SpotCpuPrice:               0,
-		SpotMemoryPrice:            0,
-		SpotCpuBalancedPrice:       0,
-		SpotMemoryBalancedPrice:    0,
-		SpotCpuScaleoutPrice:       0,
-		SpotMemoryScaleoutPrice:    0,
-		SpotArmCpuScaleoutPrice:    0,
-		SpotArmMemoryScaleoutPrice: 0,
-	}
-
-	// If the "region" is actual "zone", we need to remove the zone to get the pricing for the whole region.
-	if len(strings.Split(region, "-")) > 2 {
-		region = strings.Join(
-			strings.Split(region, "-")[:len(
-				strings.Split(
-					region,
-					"-",
-				),
-			)-1],
-			"-",
-		)
-	}
-
-	ctx := context.Background()
-
-	cloudbillingService, err := cloudbilling.NewService(ctx, option.WithScopes(cloudbilling.CloudPlatformScope))
-	if err != nil {
-		err = fmt.Errorf("unable to initialize cloud billing service: %v", err)
-		return PriceList{}, err
-	}
-
-	pricingInfo, err := cloudbillingService.Services.Skus.List("services/" + sku).CurrencyCode("USD").Do()
-	if err != nil {
-		err = fmt.Errorf("unable to fetch cloud billing prices: %v", err)
-		return PriceList{}, err
-	}
-
-	for _, sku := range pricingInfo.Skus {
-		if !slices.Contains(sku.ServiceRegions, region) {
-			continue
-		}
-
-		decimal := sku.PricingInfo[0].PricingExpression.TieredRates[0].UnitPrice.Units * 1000000000
-		mantissa := sku.PricingInfo[0].PricingExpression.TieredRates[0].UnitPrice.Nanos * int64(sku.PricingInfo[0].PricingExpression.DisplayQuantity)
-
-		price := float64(decimal+mantissa) / 1000000000
-
-		switch sku.Description {
-		case "Autopilot Pod Ephemeral Storage Requests (" + region + ")":
-			pricing.StoragePrice = price
-
-		case "Autopilot Pod Memory Requests (" + region + ")":
-			pricing.MemoryPrice = price
-
-		case "Autopilot Pod mCPU Requests (" + region + ")":
-			pricing.CpuPrice = price
-
-		case "Autopilot Balanced Pod Memory Requests (" + region + ")":
-			pricing.MemoryBalancedPrice = price
-
-		case "Autopilot Balanced Pod mCPU Requests (" + region + ")":
-			pricing.CpuBalancedPrice = price
-
-		case "Autopilot Scale-Out x86 Pod Memory Requests (" + region + ")":
-			pricing.MemoryScaleoutPrice = price
-
-		case "Autopilot Scale-Out x86 Pod mCPU Requests (" + region + ")":
-			pricing.CpuScaleoutPrice = price
-
-		case "Autopilot Scale-Out Arm Spot Pod Memory Requests (" + region + ")":
-			pricing.MemoryArmScaleoutPrice = price
-
-		case "Autopilot Scale-Out Arm Spot Pod mCPU Requests (" + region + ")":
-			pricing.CpuArmScaleoutPrice = price
-
-		case "Autopilot Spot Pod Memory Requests (" + region + ")":
-			pricing.SpotMemoryPrice = price
-
-		case "Autopilot Spot Pod mCPU Requests (" + region + ")":
-			pricing.SpotCpuPrice = price
-
-		case "Autopilot Balanced Spot Pod Memory Requests (" + region + ")":
-			pricing.SpotMemoryBalancedPrice = price
-
-		case "Autopilot Balanced Spot Pod mCPU Requests (" + region + ")":
-			pricing.SpotCpuBalancedPrice = price
-
-		case "Autopilot Scale-Out x86 Spot Pod Memory Requests (" + region + ")":
-			pricing.SpotMemoryScaleoutPrice = price
-
-		case "Autopilot Scale-Out x86 Spot Pod mCPU Requests (" + region + ")":
-			pricing.SpotCpuScaleoutPrice = price
-
-		case "Autopilot Scale-Out Arm Spot Pod Memory Requests (" + region + ")":
-			pricing.SpotArmMemoryScaleoutPrice = price
-
-		case "Autopilot Scale-Out Arm Spot Pod mCPU Requests (" + region + ")":
-			pricing.SpotArmCpuScaleoutPrice = price
-
-		}
-
-	}
-
-	return pricing, nil
-}
-
+// TODO: implement ini file minimums
 func ValidateAndRoundResources(mCPU int64, memory int64, storage int64) (int64, int64, int64) {
 	// Lowest possible mCPU request, but this is different for DaemonSets that are not yet implemented
-	if mCPU < 250 {
-		mCPU = 250
+	if mCPU < 50 {
+		mCPU = 50
 	}
 
 	// Minumum memory request, however it's 1G for Scaleout, we don't yet account for this
-	if memory < 500 {
-		memory = 500
+	if memory < 52 {
+		memory = 52
 	}
 
 	if storage < 10 {
 		storage = 10
 	}
 
-	mCPUMissing := (250 - (mCPU % 250))
-	if mCPUMissing == 250 {
+	mCPUMissing := (50 - (mCPU % 50))
+	if mCPUMissing == 50 {
 		// Nothing to do here, return original values
 		return mCPU, memory, storage
 	}
 
 	// Add missing value to reach nearst 250mCPU step
 	mCPU += mCPUMissing
-	if memory < mCPU {
-		memory = mCPU
-	}
 
 	return mCPU, memory, storage
 }
