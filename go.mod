@@ -14,7 +14,7 @@
 
 module github.com/GoogleCloudPlatform/autopilot-cost-calculator
 
-go 1.20
+go 1.23.0
 
 require (
 	github.com/charmbracelet/bubbles v0.16.1
@@ -30,8 +30,7 @@ require (
 )
 
 require (
-	cloud.google.com/go/compute v1.19.3 // indirect
-	cloud.google.com/go/compute/metadata v0.2.3 // indirect
+	cloud.google.com/go/compute/metadata v0.3.0 // indirect
 	github.com/aymanbagabas/go-osc52/v2 v2.0.1 // indirect
 	github.com/charmbracelet/x/ansi v0.4.2 // indirect
 	github.com/containerd/console v1.0.4-0.20230313162750-1ae8d489ac81 // indirect
@@ -71,7 +70,7 @@ require (
 	go.opencensus.io v0.24.0 // indirect
 	golang.org/x/crypto v0.21.0 // indirect
 	golang.org/x/net v0.23.0 // indirect
-	golang.org/x/oauth2 v0.9.0 // indirect
+	golang.org/x/oauth2 v0.27.0 // indirect
 	golang.org/x/sync v0.3.0 // indirect
 	golang.org/x/sys v0.19.0 // indirect
 	golang.org/x/term v0.18.0 // indirect
