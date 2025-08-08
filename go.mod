@@ -16,7 +16,7 @@ module github.com/GoogleCloudPlatform/autopilot-cost-calculator
 
 go 1.23.0
 
-toolchain go1.24.5
+toolchain go1.24.6
 
 require (
 	github.com/charmbracelet/bubbles v0.16.1
