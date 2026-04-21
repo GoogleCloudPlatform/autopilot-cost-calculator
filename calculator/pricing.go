@@ -187,6 +187,10 @@ func GetGCEPricing(sku string, region string) (GCEPriceList, error) {
 				continue
 			}
 
+			if len(sku.PricingInfo) == 0 || len(sku.PricingInfo[0].PricingExpression.TieredRates) == 0 {
+				continue
+			}
+
 			decimal := sku.PricingInfo[0].PricingExpression.TieredRates[0].UnitPrice.Units * 1000000000
 			mantissa := sku.PricingInfo[0].PricingExpression.TieredRates[0].UnitPrice.Nanos * int64(sku.PricingInfo[0].PricingExpression.DisplayQuantity)
 
@@ -348,6 +352,10 @@ func GetAutopilotPricing(sku string, region string) (AutopilotPriceList, error) 
 	err = cloudbillingService.Services.Skus.List("services/"+sku).CurrencyCode("USD").Pages(ctx, func(pricingInfo *cloudbilling.ListSkusResponse) error {
 		for _, sku := range pricingInfo.Skus {
 			if !slices.Contains(sku.ServiceRegions, region) {
+				continue
+			}
+
+			if len(sku.PricingInfo) == 0 || len(sku.PricingInfo[0].PricingExpression.TieredRates) == 0 {
 				continue
 			}
 
