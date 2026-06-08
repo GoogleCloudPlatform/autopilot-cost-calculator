@@ -24,7 +24,7 @@ require (
 	github.com/charmbracelet/lipgloss v1.0.0
 	golang.org/x/exp v0.0.0-20250718183923-645b1fa84792
 	google.golang.org/api v0.129.0
-	gopkg.in/ini.v1 v1.67.0
+	gopkg.in/ini.v1 v1.67.3
 	k8s.io/api v0.27.3
 	k8s.io/apimachinery v0.27.3
 	k8s.io/client-go v0.27.3
