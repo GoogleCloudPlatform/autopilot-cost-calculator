@@ -19,7 +19,7 @@ go 1.23.0
 toolchain go1.24.5
 
 require (
-	github.com/charmbracelet/bubbles v0.16.1
+	github.com/charmbracelet/bubbles/v2 v2.1.1
 	github.com/charmbracelet/bubbletea v0.24.2
 	github.com/charmbracelet/lipgloss v1.0.0
 	golang.org/x/exp v0.0.0-20250718183923-645b1fa84792
