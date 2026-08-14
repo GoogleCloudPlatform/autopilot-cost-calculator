@@ -17,7 +17,7 @@ module github.com/GoogleCloudPlatform/autopilot-cost-calculator
 go 1.25.0
 
 require (
-	github.com/charmbracelet/lipgloss v1.1.0
+	github.com/charmbracelet/lipgloss/v2 v2.0.6
 	google.golang.org/api v0.220.0
 	gopkg.in/ini.v1 v1.67.3
 	k8s.io/api v0.31.2
