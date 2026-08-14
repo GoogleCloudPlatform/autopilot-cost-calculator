@@ -20,7 +20,7 @@ require (
 	github.com/charmbracelet/bubbles v1.0.0
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/lipgloss v1.1.0
-	golang.org/x/exp v0.0.0-20231006140011-7918f672742d
+	golang.org/x/exp v0.0.0-20260813180055-c1d0aacb2297
 	google.golang.org/api v0.293.0
 	gopkg.in/ini.v1 v1.67.3
 	k8s.io/api v0.31.2
