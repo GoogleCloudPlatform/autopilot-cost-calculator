@@ -22,7 +22,7 @@ require (
 	gopkg.in/ini.v1 v1.67.3
 	k8s.io/api v0.31.2
 	k8s.io/apimachinery v0.31.2
-	k8s.io/client-go v0.31.2
+	k8s.io/client-go v11.0.0+incompatible
 	k8s.io/metrics v0.31.2
 )
 
