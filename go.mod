@@ -19,7 +19,7 @@ go 1.25.0
 require (
 	github.com/charmbracelet/lipgloss v1.1.0
 	google.golang.org/api v0.220.0
-	gopkg.in/ini.v1 v1.67.3
+	gopkg.in/ini.v1 v1.68.0
 	k8s.io/api v0.31.2
 	k8s.io/apimachinery v0.31.2
 	k8s.io/client-go v0.31.2
